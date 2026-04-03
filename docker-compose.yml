@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+
+  # ── Flask Math API ──────────────────────────────────────
+  math-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.mathapi
+    container_name: math_api
+    restart: unless-stopped
+    ports:
+      - "5000:5000"          # Expose externally: curl http://localhost:5000/math?q=2+2
+    environment:
+      - FLASK_PORT=5000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ── Telegram Bot ────────────────────────────────────────
+  giveaway-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram_giveaway_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - bot_data:/app/data
+    environment:
+      - DB_PATH=/app/data/giveaway.db
+      - FLASK_API_URL=http://math-api:5000   # Internal Docker network URL
+    depends_on:
+      math-api:
+        condition: service_healthy
+
+volumes:
+  bot_data:
+    driver: local

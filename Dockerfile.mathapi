@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY math_api.py .
+
+ENV FLASK_PORT=5000
+
+CMD ["python", "math_api.py"]
