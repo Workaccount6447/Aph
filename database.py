@@ -1,148 +1,79 @@
 import sqlite3
 import os
-from datetime import datetime
-from typing import Optional, List, Tuple
 
-DB_PATH = os.getenv("DB_PATH", "giveaway.db")
-
+DB_PATH = os.getenv("DB_PATH", "/app/data/bot.db")
 
 class Database:
     def __init__(self):
+        # Ensure the directory exists before opening the file
+        os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
         self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        self._create_tables()
+        self._init_tables()
 
-    def _create_tables(self):
-        self.conn.executescript("""
+    def _init_tables(self):
+        self.conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id       INTEGER PRIMARY KEY,
-                username      TEXT DEFAULT '',
-                full_name     TEXT DEFAULT '',
-                referrer_id   INTEGER,
-                referral_count INTEGER DEFAULT 0,
-                joined_channel INTEGER DEFAULT 0,
-                joined_at     TEXT DEFAULT (datetime('now'))
-            );
+                user_id     INTEGER PRIMARY KEY,
+                username    TEXT    DEFAULT '',
+                full_name   TEXT    DEFAULT '',
+                referrer_id INTEGER DEFAULT NULL,
+                ref_count   INTEGER DEFAULT 0,
+                joined      INTEGER DEFAULT 0
+            )
         """)
         self.conn.commit()
 
-    # ─── User Management ───────────────────────────────────────
+    # ── Write ──────────────────────────────────────────────
 
-    def add_user(
-        self,
-        user_id: int,
-        username: str,
-        full_name: str,
-        referrer_id: Optional[int] = None,
-    ) -> bool:
-        """Insert user if not exists. Returns True if newly added."""
-        existing = self.get_user(user_id)
-        if existing:
-            # Update name/username in case they changed
-            self.conn.execute(
-                "UPDATE users SET username=?, full_name=? WHERE user_id=?",
-                (username, full_name, user_id),
-            )
-            self.conn.commit()
-            return False
-
-        self.conn.execute(
-            """INSERT INTO users (user_id, username, full_name, referrer_id)
-               VALUES (?, ?, ?, ?)""",
-            (user_id, username, full_name, referrer_id),
-        )
+    def add_user(self, user_id: int, username: str, full_name: str, referrer_id=None):
+        self.conn.execute("""
+            INSERT INTO users (user_id, username, full_name, referrer_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username  = excluded.username,
+                full_name = excluded.full_name
+        """, (user_id, username, full_name, referrer_id))
         self.conn.commit()
-        return True
-
-    def get_user(self, user_id: int) -> Optional[Tuple]:
-        cur = self.conn.execute(
-            "SELECT * FROM users WHERE user_id=?", (user_id,)
-        )
-        return cur.fetchone()
-
-    def get_referrer(self, user_id: int) -> Optional[int]:
-        cur = self.conn.execute(
-            "SELECT referrer_id FROM users WHERE user_id=?", (user_id,)
-        )
-        row = cur.fetchone()
-        return row[0] if row else None
 
     def mark_channel_joined(self, user_id: int):
         self.conn.execute(
-            "UPDATE users SET joined_channel=1 WHERE user_id=?", (user_id,)
+            "UPDATE users SET joined = 1 WHERE user_id = ?", (user_id,)
         )
         self.conn.commit()
 
-    def has_joined_channel(self, user_id: int) -> bool:
-        cur = self.conn.execute(
-            "SELECT joined_channel FROM users WHERE user_id=?", (user_id,)
-        )
-        row = cur.fetchone()
-        return bool(row[0]) if row else False
-
-    # ─── Referrals ─────────────────────────────────────────────
-
-    def increment_referral(self, referrer_id: int):
-        """Increment referral count for a user."""
+    def increment_referral(self, user_id: int):
         self.conn.execute(
-            "UPDATE users SET referral_count = referral_count + 1 WHERE user_id=?",
-            (referrer_id,),
+            "UPDATE users SET ref_count = ref_count + 1 WHERE user_id = ?", (user_id,)
         )
         self.conn.commit()
+
+    # ── Read ───────────────────────────────────────────────
 
     def get_referral_count(self, user_id: int) -> int:
-        cur = self.conn.execute(
-            "SELECT referral_count FROM users WHERE user_id=?", (user_id,)
-        )
-        row = cur.fetchone()
+        row = self.conn.execute(
+            "SELECT ref_count FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
         return row[0] if row else 0
 
-    # ─── Listings ──────────────────────────────────────────────
+    def get_referrer(self, user_id: int):
+        row = self.conn.execute(
+            "SELECT referrer_id FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return row[0] if row else None
 
-    def get_all_users(self) -> List[Tuple]:
-        """Returns (user_id, username, full_name, referral_count) for all users."""
-        cur = self.conn.execute(
-            "SELECT user_id, username, full_name, referral_count FROM users ORDER BY referral_count DESC"
-        )
-        return cur.fetchall()
+    def get_rank(self, user_id: int):
+        """Returns (rank, total_users, top_ref_count)."""
+        rows = self.conn.execute(
+            "SELECT user_id, ref_count FROM users ORDER BY ref_count DESC"
+        ).fetchall()
+        total = len(rows)
+        top_count = rows[0][1] if rows else 0
+        rank = next((i + 1 for i, (uid, _) in enumerate(rows) if uid == user_id), total)
+        return rank, total, top_count
 
-    def get_eligible_users(self, min_refs: int) -> List[Tuple]:
-        """Returns users who have reached the referral threshold."""
-        cur = self.conn.execute(
-            """SELECT user_id, username, full_name, referral_count
-               FROM users WHERE referral_count >= ?
-               ORDER BY referral_count DESC""",
-            (min_refs,),
-        )
-        return cur.fetchall()
-
-    def get_rank(self, user_id: int) -> tuple:
-        """
-        Returns (rank, total_users, top_referral_count) for a given user.
-        Rank 1 = most referrals. Ties share the same rank.
-        """
-        cur = self.conn.execute(
-            "SELECT referral_count FROM users WHERE user_id=?", (user_id,)
-        )
-        row = cur.fetchone()
-        user_refs = row[0] if row else 0
-
-        # Count users with strictly MORE referrals (0-indexed rank)
-        cur = self.conn.execute(
-            "SELECT COUNT(*) FROM users WHERE referral_count > ?", (user_refs,)
-        )
-        rank = cur.fetchone()[0] + 1  # 1-indexed
-
-        cur = self.conn.execute("SELECT COUNT(*) FROM users")
-        total_users = cur.fetchone()[0]
-
-        cur = self.conn.execute("SELECT MAX(referral_count) FROM users")
-        top_count = cur.fetchone()[0] or 0
-
-        return rank, total_users, top_count
-
-    def total_users(self) -> int:
-        cur = self.conn.execute("SELECT COUNT(*) FROM users")
-        return cur.fetchone()[0]
-
-    def close(self):
-        self.conn.close()
+    def get_all_users(self):
+        """Returns list of (user_id, username, full_name, ref_count) sorted DESC."""
+        return self.conn.execute(
+            "SELECT user_id, username, full_name, ref_count "
+            "FROM users ORDER BY ref_count DESC"
+        ).fetchall()
